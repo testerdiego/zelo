@@ -1,263 +1,296 @@
 import streamlit as st
 import sqlite3
 import requests
-import json
 import base64
 from datetime import datetime
 import uuid
 import random
 import string
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Zelo - Cuidado Conectado", page_icon="❤️", layout="centered")
+# -------------------------
+# CONFIGURAÇÃO DA PÁGINA
+# -------------------------
+st.set_page_config(
+    page_title="Zelo - Cuidado Conectado",
+    page_icon="❤️",
+    layout="centered"
+)
 
-# CSS para estilização (Emulando o visual moderno do React/Tailwind)
 st.markdown("""
-    <style>
-    .elder-card {
-        padding: 20px;
-        border-radius: 20px;
-        border: 2px solid #3B82F6;
-        margin-bottom: 20px;
-        background-color: #f8fafc;
-    }
-    .stButton>button {
-        width: 100%;
-        border-radius: 15px;
-        font-weight: bold;
-    }
-    .big-font { font-size: 30px !important; font-weight: 800; }
-    </style>
-    """, unsafe_allow_html=True)
+<style>
+.elder-card {
+    padding: 20px;
+    border-radius: 20px;
+    border: 2px solid #3B82F6;
+    margin-bottom: 20px;
+    background-color: #f8fafc;
+}
+.stButton>button {
+    width: 100%;
+    border-radius: 15px;
+    font-weight: bold;
+}
+.big-font { font-size: 30px !important; font-weight: 800; }
+</style>
+""", unsafe_allow_html=True)
 
-# ======================================================
+# -------------------------
 # SQLITE
-# ======================================================
+# -------------------------
 conn = sqlite3.connect("zelo.db", check_same_thread=False)
 cursor = conn.cursor()
 
-def init_db():
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        username TEXT UNIQUE,
-        name TEXT,
-        password TEXT,
-        role TEXT
-    )
-    """)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS elders (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    age INTEGER,
+    gender TEXT,
+    photo TEXT,
+    access_code TEXT,
+    help_requested INTEGER
+)
+""")
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS elders (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        age INTEGER,
-        gender TEXT,
-        photo TEXT,
-        access_code TEXT,
-        help_requested INTEGER
-    )
-    """)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS meds (
+    id TEXT PRIMARY KEY,
+    elder_id TEXT,
+    name TEXT,
+    dosage TEXT,
+    freq TEXT
+)
+""")
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS meds (
-        id TEXT PRIMARY KEY,
-        elder_id TEXT,
-        name TEXT,
-        dosage TEXT,
-        freq TEXT
-    )
-    """)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS logs (
+    id TEXT PRIMARY KEY,
+    elder_id TEXT,
+    med_id TEXT,
+    med_name TEXT,
+    time TEXT,
+    date TEXT
+)
+""")
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS logs (
-        id TEXT PRIMARY KEY,
-        elder_id TEXT,
-        med_name TEXT,
-        time TEXT,
-        date TEXT
-    )
-    """)
+conn.commit()
 
-    conn.commit()
-
-init_db()
-
-# --- HELPER: GEMINI TTS ---
-def call_gemini_tts(text, api_key):
+# -------------------------
+# TTS - GEMINI
+# -------------------------
+def call_gemini_tts(text):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={st.secrets['GEMINI_API_KEY']}"
     payload = {
         "contents": [{"parts": [{"text": text}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
-            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}}
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {"voiceName": "Kore"}
+                }
+            }
         }
     }
     try:
-        response = requests.post(url, json=payload)
-        data = response.json()
-        audio_base64 = data['candidates'][0]['content']['parts'][0]['inlineData']['data']
-        return audio_base64
+        r = requests.post(url, json=payload)
+        audio = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        return audio
     except:
         return None
 
-# --- ESTADO GLOBAL ---
-if "profile" not in st.session_state: st.session_state.profile = None
-if "selected_elder_id" not in st.session_state: st.session_state.selected_elder_id = None
+# -------------------------
+# ESTADO
+# -------------------------
+if "profile" not in st.session_state:
+    st.session_state.profile = None
 
-# --- FUNÇÕES DE DADOS ---
+if "selected_elder_id" not in st.session_state:
+    st.session_state.selected_elder_id = None
+
+# -------------------------
+# FUNÇÕES SQLITE
+# -------------------------
 def get_elders():
-    docs = st.session_state.db.collection('elders').stream()
-    return [{**doc.to_dict(), "id": doc.id} for doc in docs]
+    cursor.execute("SELECT * FROM elders")
+    rows = cursor.fetchall()
+
+    elders = []
+    for r in rows:
+        elders.append({
+            "id": r[0],
+            "name": r[1],
+            "age": r[2],
+            "gender": r[3],
+            "photo": r[4],
+            "accessCode": r[5],
+            "helpRequested": bool(r[6]),
+            "meds": get_meds(r[0]),
+            "logs": get_logs(r[0])
+        })
+    return elders
 
 def add_elder(name, age, gender):
-    import random, string
+    elder_id = str(uuid.uuid4())
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    new_elder = {
-        "name": name,
-        "age": age,
-        "gender": gender,
-        "accessCode": code,
-        "meds": [],
-        "logs": [],
-        "helpRequested": False,
-        "photo": "👴" if gender == "M" else "👵"
-    }
-    st.session_state.db.collection('elders').add(new_elder)
+    photo = "👴" if gender == "M" else "👵"
 
-def mark_med_taken(elder_id, elder_data, med_id):
+    cursor.execute(
+        "INSERT INTO elders VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (elder_id, name, age, gender, photo, code, 0)
+    )
+    conn.commit()
+
+def get_meds(elder_id):
+    cursor.execute("SELECT id, name, dosage, freq FROM meds WHERE elder_id = ?", (elder_id,))
+    return [{"id": r[0], "name": r[1], "dosage": r[2], "freq": r[3]} for r in cursor.fetchall()]
+
+def add_med(elder_id, name, dosage, freq):
+    cursor.execute(
+        "INSERT INTO meds VALUES (?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), elder_id, name, dosage, freq)
+    )
+    conn.commit()
+
+def get_logs(elder_id):
+    cursor.execute(
+        "SELECT med_id, med_name, time, date FROM logs WHERE elder_id = ? ORDER BY date DESC, time DESC LIMIT 30",
+        (elder_id,)
+    )
+    return [{"medId": r[0], "medName": r[1], "time": r[2], "date": r[3]} for r in cursor.fetchall()]
+
+def mark_med_taken(elder_id, med):
     now = datetime.now()
-    new_log = {
-        "medId": med_id,
-        "medName": next(m['name'] for m in elder_data['meds'] if m['id'] == med_id),
-        "time": now.strftime("%H:%M"),
-        "date": now.strftime("%d/%m/%Y"),
-        "status": "taken"
-    }
-    updated_logs = [new_log] + elder_data.get('logs', [])
-    st.session_state.db.collection('elders').document(elder_id).update({
-        "logs": updated_logs[:30]
-    })
+    cursor.execute(
+        "INSERT INTO logs VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            str(uuid.uuid4()),
+            elder_id,
+            med["id"],
+            med["name"],
+            now.strftime("%H:%M"),
+            now.strftime("%d/%m/%Y")
+        )
+    )
+    conn.commit()
 
-# --- INTERFACE: SELEÇÃO DE PERFIL ---
+def request_help(elder_id):
+    cursor.execute(
+        "UPDATE elders SET help_requested = 1 WHERE id = ?",
+        (elder_id,)
+    )
+    conn.commit()
+
+# -------------------------
+# MENU INICIAL
+# -------------------------
 if st.session_state.profile is None:
     st.title("❤️ Zelo")
     st.subheader("Cuidado conectado em tempo real")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("SOU CUIDADOR", use_container_width=True):
-            st.session_state.profile = "caregiver"
-            st.rerun()
-    with col2:
-        if st.button("SOU IDOSO", use_container_width=True):
-            st.session_state.profile = "elder"
-            st.rerun()
 
-# --- INTERFACE: CUIDADOR ---
+    col1, col2 = st.columns(2)
+    if col1.button("SOU CUIDADOR", use_container_width=True):
+        st.session_state.profile = "caregiver"
+        st.rerun()
+
+    if col2.button("SOU IDOSO", use_container_width=True):
+        st.session_state.profile = "elder"
+        st.rerun()
+
+# -------------------------
+# CUIDADOR
+# -------------------------
 elif st.session_state.profile == "caregiver":
     st.sidebar.button("Sair", on_click=lambda: st.session_state.clear())
     st.title("👨‍⚕️ Painel do Cuidador")
-    
+
     elders = get_elders()
-    
+
     if st.session_state.selected_elder_id is None:
         with st.expander("➕ Registrar Novo Idoso"):
             name = st.text_input("Nome")
-            age = st.number_input("Idade", min_value=0, max_value=120)
+            age = st.number_input("Idade", 0, 120)
             gender = st.selectbox("Gênero", ["M", "F"])
-            if st.button("Salvar Registro"):
+            if st.button("Salvar"):
                 add_elder(name, age, gender)
                 st.success("Registrado!")
                 st.rerun()
-        
-        st.write("### Meus Idosos")
+
         for e in elders:
-            with st.container():
-                col_a, col_b = st.columns([4, 1])
-                col_a.write(f"**{e['name']}** ({e['age']} anos) - Código: `{e['accessCode']}`")
-                if col_b.button("Ver", key=e['id']):
-                    st.session_state.selected_elder_id = e['id']
-                    st.rerun()
-                if e.get('helpRequested'):
-                    st.error("🚨 Pedido de ajuda ativo!")
+            col1, col2 = st.columns([4, 1])
+            col1.write(f"**{e['name']}** ({e['age']} anos) - Código `{e['accessCode']}`")
+            if col2.button("Ver", key=e["id"]):
+                st.session_state.selected_elder_id = e["id"]
+                st.rerun()
+            if e["helpRequested"]:
+                st.error("🚨 Pedido de ajuda ativo")
 
     else:
-        # Visão detalhada do idoso
-        current_elder = next(e for e in elders if e['id'] == st.session_state.selected_elder_id)
+        elder = next(e for e in elders if e["id"] == st.session_state.selected_elder_id)
         if st.button("⬅️ Voltar"):
             st.session_state.selected_elder_id = None
             st.rerun()
-            
-        st.divider()
-        st.header(f"{current_elder['photo']} {current_elder['name']}")
-        
+
+        st.header(f"{elder['photo']} {elder['name']}")
         tab1, tab2 = st.tabs(["Medicamentos", "Histórico"])
-        
+
         with tab1:
             with st.popover("➕ Adicionar Medicamento"):
-                m_name = st.text_input("Nome do Remédio")
-                m_dose = st.text_input("Dose")
-                m_freq = st.text_input("Horário/Freq")
+                n = st.text_input("Nome")
+                d = st.text_input("Dose")
+                f = st.text_input("Horário")
                 if st.button("Adicionar"):
-                    new_med = {"id": str(datetime.now().timestamp()), "name": m_name, "dosage": m_dose, "freq": m_freq}
-                    meds = current_elder.get('meds', [])
-                    meds.append(new_med)
-                    st.session_state.db.collection('elders').document(current_elder['id']).update({"meds": meds})
+                    add_med(elder["id"], n, d, f)
                     st.rerun()
-            
-            for m in current_elder.get('meds', []):
+
+            for m in elder["meds"]:
                 st.info(f"💊 **{m['name']}** - {m['dosage']} ({m['freq']})")
 
         with tab2:
-            for log in current_elder.get('logs', []):
-                st.write(f"✅ {log['time']} - {log['medName']}")
+            for l in elder["logs"]:
+                st.write(f"✅ {l['time']} - {l['medName']}")
 
-# --- INTERFACE: IDOSO ---
+# -------------------------
+# IDOSO
+# -------------------------
 elif st.session_state.profile == "elder":
     if st.session_state.selected_elder_id is None:
         st.title("🔑 Acesso do Idoso")
-        code_input = st.text_input("Digite seu código de 6 dígitos", max_chars=6).upper()
+        code = st.text_input("Digite seu código", max_chars=6).upper()
         if st.button("ENTRAR"):
-            elders = get_elders()
-            found = next((e for e in elders if e['accessCode'] == code_input), None)
-            if found:
-                st.session_state.selected_elder_id = found['id']
+            elder = next((e for e in get_elders() if e["accessCode"] == code), None)
+            if elder:
+                st.session_state.selected_elder_id = elder["id"]
                 st.rerun()
             else:
-                st.error("Código não encontrado.")
-    else:
-        elders = get_elders()
-        current_elder = next(e for e in elders if e['id'] == st.session_state.selected_elder_id)
-        
-        st.markdown(f"<p class='big-font'>Olá, {current_elder['name']}!</p>", unsafe_allow_html=True)
-        
-        today = datetime.now().strftime("%d/%m/%Y")
-        
-        for med in current_elder.get('meds', []):
-            is_taken = any(l['medId'] == med['id'] and l['date'] == today for l in current_elder.get('logs', []))
-            
-            with st.container():
-                st.markdown(f"""<div class='elder-card' style='border-color: {"#10b981" if is_taken else "#3b82f6"}'>
-                    <h2>{'✅' if is_taken else '💊'} {med['name']}</h2>
-                    <p>{med['dosage']} • {med['freq']}</p>
-                </div>""", unsafe_allow_html=True)
-                
-                if not is_taken:
-                    col_tts, col_done = st.columns(2)
-                    with col_tts:
-                        if st.button(f"🔊 Ouvir", key=f"tts_{med['id']}"):
-                            # Nota: Requer API KEY do Gemini configurada nos secrets
-                            audio_b64 = call_gemini_tts(f"Está na hora de tomar o {med['name']}", st.secrets["GEMINI_API_KEY"])
-                            if audio_b64:
-                                st.audio(base64.b64decode(audio_b64), format="audio/wav")
-                    
-                    with col_done:
-                        if st.button(f"JÁ TOMEI", key=f"btn_{med['id']}", type="primary"):
-                            mark_med_taken(current_elder['id'], current_elder, med['id'])
-                            st.rerun()
+                st.error("Código inválido")
 
-        st.divider()
-        if st.button("🆘 PEDIR AJUDA", type="secondary", use_container_width=True):
-            st.session_state.db.collection('elders').document(current_elder['id']).update({"helpRequested": True})
-            st.warning("Ajuda solicitada ao seu cuidador!")
+    else:
+        elder = next(e for e in get_elders() if e["id"] == st.session_state.selected_elder_id)
+        st.markdown(f"<p class='big-font'>Olá, {elder['name']}!</p>", unsafe_allow_html=True)
+
+        today = datetime.now().strftime("%d/%m/%Y")
+
+        for m in elder["meds"]:
+            taken = any(l["medId"] == m["id"] and l["date"] == today for l in elder["logs"])
+
+            st.markdown(
+                f"<div class='elder-card' style='border-color:{'#10b981' if taken else '#3b82f6'}'>"
+                f"<h2>{'✅' if taken else '💊'} {m['name']}</h2>"
+                f"<p>{m['dosage']} • {m['freq']}</p></div>",
+                unsafe_allow_html=True
+            )
+
+            if not taken:
+                col1, col2 = st.columns(2)
+                if col1.button("🔊 Ouvir", key=f"tts_{m['id']}"):
+                    audio = call_gemini_tts(f"Está na hora de tomar o {m['name']}")
+                    if audio:
+                        st.audio(base64.b64decode(audio))
+
+                if col2.button("JÁ TOMEI", key=f"take_{m['id']}"):
+                    mark_med_taken(elder["id"], m)
+                    st.rerun()
+
+        if st.button("🆘 PEDIR AJUDA", use_container_width=True):
+            request_help(elder["id"])
+            st.warning("Ajuda solicitada!")
