@@ -274,7 +274,7 @@ elif st.session_state.profile == "elder":
             taken = any(l["medId"] == m["id"] and l["date"] == today for l in elder["logs"])
 
             st.markdown(
-                f"<div class='elder-card' style='border-color:{'#10b981' if taken else '#3b82f6'}'>"
+                f"<div class='elder-card' style='border-color:{'#10b981' if taken else '#3b82f6'}; color:#0f172a;'>"
                 f"<h2>{'✅' if taken else '💊'} {m['name']}</h2>"
                 f"<p>{m['dosage']} • {m['freq']}</p></div>",
                 unsafe_allow_html=True
